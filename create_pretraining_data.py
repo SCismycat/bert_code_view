@@ -189,16 +189,16 @@ def create_training_instances(input_files, tokenizer, max_seq_length,
   :param input_files:源文件txt，list()类型
   :param tokenizer:word_2_id类；
   :param max_seq_length: 最大句子长度
-  :param dupe_factor:
-  :param short_seq_prob:
-  :param masked_lm_prob:
-  :param max_predictions_per_seq:
-  :param rng:
+  :param dupe_factor: 以不同的mask产生训练数据的次数
+  :param short_seq_prob: 搞训练数据的时候，训练数据长度最好小于max_len
+  :param masked_lm_prob: 随机遮盖的概率
+  :param max_predictions_per_seq: 每个句子被mask的最大数量
+  :param rng: 随机数
   :return:
   '''
   """Create `TrainingInstance`s from raw text."""
   all_documents = [[]]
-
+  # 输入文件有两种格式要求。第一，每行必须一个句子，不能是段落或片段；第二，每个document之间必须以空行作为结束符。
   # Input file format:
   # (1) One sentence per line. These should ideally be actual sentences, not
   # entire paragraphs or arbitrary spans of text. (Because we use the
@@ -218,17 +218,19 @@ def create_training_instances(input_files, tokenizer, max_seq_length,
           all_documents.append([])
         tokens = tokenizer.tokenize(line)
         if tokens:
-          all_documents[-1].append(tokens)
+          all_documents[-1].append(tokens) # 二维列表(文章，句子)
 
   # Remove empty documents
-  all_documents = [x for x in all_documents if x]
-  rng.shuffle(all_documents)
+  all_documents = [x for x in all_documents if x] # 删除空行
+  rng.shuffle(all_documents)# 随机打乱
 
   vocab_words = list(tokenizer.vocab.keys())
   instances = []
+  # 每个数据都会被循环 dupe_factor次，每次都是以不同的概率进行随机mask。
   for _ in range(dupe_factor):
     for document_index in range(len(all_documents)):
       instances.extend(
+        # 构造 next Sentence和 masked data
           create_instances_from_document(
               all_documents, document_index, max_seq_length, short_seq_prob,
               masked_lm_prob, max_predictions_per_seq, vocab_words, rng))
