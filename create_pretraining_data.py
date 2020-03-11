@@ -27,14 +27,14 @@ flags = tf.flags
 
 FLAGS = flags.FLAGS
 # 输入文件
-flags.DEFINE_string("input_file", None,
+flags.DEFINE_string("input_file", "./sample_text.txt",
                     "Input raw text file (or comma-separated list of files).")
 # 输出文件：tf.tfrecord 输出TensorFlow训练格式
 flags.DEFINE_string(
-    "output_file", None,
+    "output_file", "./sample.tfrecord",
     "Output TF example file (or comma-separated list of files).")
 # 词袋路径
-flags.DEFINE_string("vocab_file", None,
+flags.DEFINE_string("vocab_file", "./vocab.txt",
                     "The vocabulary file that the BERT model was trained on.")
 # 英文里的大小写
 flags.DEFINE_bool(
@@ -176,12 +176,7 @@ def create_float_feature(values):
   return feature
 
 # c从源文件中创建训练实例。
-"""
-输入：
-  input_files  ；tokenizer： word_2_id类；maxseq
-  
 
-"""
 def create_training_instances(input_files, tokenizer, max_seq_length,
                               dupe_factor, short_seq_prob, masked_lm_prob,
                               max_predictions_per_seq, rng):
@@ -189,10 +184,10 @@ def create_training_instances(input_files, tokenizer, max_seq_length,
   :param input_files:源文件txt，list()类型
   :param tokenizer:word_2_id类；
   :param max_seq_length: 最大句子长度
-  :param dupe_factor: 以不同的mask产生训练数据的次数
-  :param short_seq_prob: 搞训练数据的时候，训练数据长度最好小于max_len
-  :param masked_lm_prob: 随机遮盖的概率
-  :param max_predictions_per_seq: 每个句子被mask的最大数量
+  :param dupe_factor: 对文档多次重复随机产生训练集，随机的次数
+  :param short_seq_prob: 为了缩小预训练和微调过程的差距，以此概率产生小于max_seq_length的训练数据
+  :param masked_lm_prob: 一条训练数据产生mask的概率，即每条训练数据随机产生max_predictions_per_seq×masked_lm_prob数量的mask
+  :param max_predictions_per_seq: 每一条训练数据mask的最大数量
   :param rng: 随机数
   :return:
   '''
@@ -216,9 +211,9 @@ def create_training_instances(input_files, tokenizer, max_seq_length,
         # Empty lines are used as document delimiters
         if not line:
           all_documents.append([])
-        tokens = tokenizer.tokenize(line)
+        tokens = tokenizer.tokenize(line) # 拆成单个的词
         if tokens:
-          all_documents[-1].append(tokens) # 二维列表(文章，句子)
+          all_documents[-1].append(tokens) # 二维列表(文章，被拆开的token)
 
   # Remove empty documents
   all_documents = [x for x in all_documents if x] # 删除空行
@@ -242,8 +237,19 @@ def create_training_instances(input_files, tokenizer, max_seq_length,
 def create_instances_from_document(
     all_documents, document_index, max_seq_length, short_seq_prob,
     masked_lm_prob, max_predictions_per_seq, vocab_words, rng):
+  """
+  :param all_documents: 所有的文档
+  :param document_index: 文档的索引
+  :param max_seq_length: 最大长度
+  :param short_seq_prob: 句子序列小于最大长度的概率？
+  :param masked_lm_prob:一条训练数据产生mask的概率，即每条训练数据随机产生max_predictions_per_seq×masked_lm_prob数量的mask
+  :param max_predictions_per_seq: 每条训练数据被mask的最大数量
+  :param vocab_words: 词表大小
+  :param rng:
+  :return:
+  """
   """Creates `TrainingInstance`s for a single document."""
-  document = all_documents[document_index]
+  document = all_documents[document_index] # 取某篇文档
 
   # Account for [CLS], [SEP], [SEP]
   max_num_tokens = max_seq_length - 3
@@ -257,6 +263,7 @@ def create_instances_from_document(
   # `max_seq_length` is a hard limit.
   target_seq_length = max_num_tokens
   if rng.random() < short_seq_prob:
+    # 如果随机数较小的话，就产生一个较短的训练长度。
     target_seq_length = rng.randint(2, max_num_tokens)
 
   # We DON'T just concatenate all of the tokens from a document into a long
@@ -265,21 +272,22 @@ def create_instances_from_document(
   # segments "A" and "B" based on the actual "sentences" provided by the user
   # input.
   instances = []
-  current_chunk = []
+  current_chunk = [] # 产生训练集的候选集
   current_length = 0
   i = 0
   while i < len(document):
-    segment = document[i]
+    segment = document[i] # 第一个词
     current_chunk.append(segment)
     current_length += len(segment)
     if i == len(document) - 1 or current_length >= target_seq_length:
       if current_chunk:
         # `a_end` is how many segments from `current_chunk` go into the `A`
         # (first) sentence.
-        a_end = 1
+        a_end = 1 # 决定有序列中有多少个词被放入A句子
         if len(current_chunk) >= 2:
+          # a_end产生的的index，永远不会大于序列长度
           a_end = rng.randint(1, len(current_chunk) - 1)
-
+        # 产生A句子
         tokens_a = []
         for j in range(a_end):
           tokens_a.extend(current_chunk[j])
@@ -296,42 +304,44 @@ def create_instances_from_document(
           # the random document is not the same as the document
           # we're processing.
           for _ in range(10):
-            random_document_index = rng.randint(0, len(all_documents) - 1)
+            random_document_index = rng.randint(0, len(all_documents) - 1) # 产生一个随机文档索引
             if random_document_index != document_index:
               break
 
-          random_document = all_documents[random_document_index]
-          random_start = rng.randint(0, len(random_document) - 1)
+          random_document = all_documents[random_document_index] # 随机产生一个文档
+          random_start = rng.randint(0, len(random_document) - 1) # 随机在该文档中产生一个开始索引
           for j in range(random_start, len(random_document)):
-            tokens_b.extend(random_document[j])
+            tokens_b.extend(random_document[j]) # 这是在构造随机的next sentence
             if len(tokens_b) >= target_b_length:
               break
           # We didn't actually use these segments so we "put them back" so
           # they don't go to waste.
-          num_unused_segments = len(current_chunk) - a_end
+          num_unused_segments = len(current_chunk) - a_end # 没用到的序列
           i -= num_unused_segments
         # Actual next
         else:
+           # 正确的next sentence
           is_random_next = False
           for j in range(a_end, len(current_chunk)):
-            tokens_b.extend(current_chunk[j])
+            tokens_b.extend(current_chunk[j]) # 这是正确的句子
+        # 将一对序列阶段为最大序列长度
         truncate_seq_pair(tokens_a, tokens_b, max_num_tokens, rng)
 
         assert len(tokens_a) >= 1
         assert len(tokens_b) >= 1
 
-        tokens = []
-        segment_ids = []
-        tokens.append("[CLS]")
+        tokens = [] # 词
+        segment_ids = [] # 句子编码，第一句为0，第二句为1
+        tokens.append("[CLS]")# 以cls开头
         segment_ids.append(0)
-        for token in tokens_a:
+        for token in tokens_a:# 把第一句塞进去，[cls] I AM
           tokens.append(token)
-          segment_ids.append(0)
+          segment_ids.append(0) # 第一句是0
 
-        tokens.append("[SEP]")
+        tokens.append("[SEP]") # next sentence间隔符
         segment_ids.append(0)
 
-        for token in tokens_b:
+        for token in tokens_b:# 第二句
           tokens.append(token)
           segment_ids.append(1)
         tokens.append("[SEP]")
@@ -361,8 +371,10 @@ MaskedLmInstance = collections.namedtuple("MaskedLmInstance",
 def create_masked_lm_predictions(tokens, masked_lm_prob,
                                  max_predictions_per_seq, vocab_words, rng):
   """Creates the predictions for the masked LM objective."""
-
-  cand_indexes = []
+  # tokens:句子
+  # masked_lm_prob:masked语言的概率
+  #
+  cand_indexes = [] # 候选的索引
   for (i, token) in enumerate(tokens):
     if token == "[CLS]" or token == "[SEP]":
       continue
@@ -384,11 +396,11 @@ def create_masked_lm_predictions(tokens, masked_lm_prob,
   rng.shuffle(cand_indexes)
 
   output_tokens = list(tokens)
-
+  # 需要masked的词是固定的。
   num_to_predict = min(max_predictions_per_seq,
                        max(1, int(round(len(tokens) * masked_lm_prob))))
 
-  masked_lms = []
+  masked_lms = [] # 掩盖的词
   covered_indexes = set()
   for index_set in cand_indexes:
     if len(masked_lms) >= num_to_predict:
@@ -405,7 +417,7 @@ def create_masked_lm_predictions(tokens, masked_lm_prob,
     if is_any_index_covered:
       continue
     for index in index_set:
-      covered_indexes.add(index)
+      covered_indexes.add(index) # 要被掩盖的词的索引
 
       masked_token = None
       # 80% of the time, replace with [MASK]
@@ -419,7 +431,7 @@ def create_masked_lm_predictions(tokens, masked_lm_prob,
         else:
           masked_token = vocab_words[rng.randint(0, len(vocab_words) - 1)]
 
-      output_tokens[index] = masked_token
+      output_tokens[index] = masked_token # 把masked——token替换原词
 
       masked_lms.append(MaskedLmInstance(index=index, label=tokens[index]))
   assert len(masked_lms) <= num_to_predict
@@ -428,12 +440,12 @@ def create_masked_lm_predictions(tokens, masked_lm_prob,
   masked_lm_positions = []
   masked_lm_labels = []
   for p in masked_lms:
-    masked_lm_positions.append(p.index)
-    masked_lm_labels.append(p.label)
-
+    masked_lm_positions.append(p.index) # 被mask掉的index
+    masked_lm_labels.append(p.label) # 被mask掉的词
+  # 返回 原来的tokens，被mask的词的位置，被mask的词。
   return (output_tokens, masked_lm_positions, masked_lm_labels)
 
-
+# 将一对序列阶段为最大序列长度
 def truncate_seq_pair(tokens_a, tokens_b, max_num_tokens, rng):
   """Truncates a pair of sequences to a maximum sequence length."""
   while True:
@@ -446,6 +458,7 @@ def truncate_seq_pair(tokens_a, tokens_b, max_num_tokens, rng):
 
     # We want to sometimes truncate from the front and sometimes from the
     # back to add more randomness and avoid biases.
+    # 从前面截断，增加随机性
     if rng.random() < 0.5:
       del trunc_tokens[0]
     else:
@@ -457,6 +470,7 @@ def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
   # FullTokenizer以vocab为词典，将词转换为对应的id。会将词进行全拆分，
   # 如果该词没出现，会拆开继续look table，比如，hello，vocab中找到了llo和he，会拆成he和##llo。
+  # 相当于词表
   tokenizer = tokenization.FullTokenizer(
       vocab_file=FLAGS.vocab_file, do_lower_case=FLAGS.do_lower_case)
 
@@ -484,7 +498,11 @@ def main(_):
 
 
 if __name__ == "__main__":
-  flags.mark_flag_as_required("input_file")
-  flags.mark_flag_as_required("output_file")
-  flags.mark_flag_as_required("vocab_file")
+  # flags.mark_flag_as_required("input_file")
+  # flags.mark_flag_as_required("output_file")
+  # flags.mark_flag_as_required("vocab_file")
+  # tf.app.run()
+  # input_file = "./sample_text.txt"
+  # flags.mark_flag_as_required(input_file)
+
   tf.app.run()
