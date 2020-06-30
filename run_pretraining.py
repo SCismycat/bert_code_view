@@ -103,7 +103,7 @@ def model_fn_builder(bert_config, init_checkpoint,learning_rate,
         tf.logging.info("*** Features ***")
         for name in sorted(features.keys()):
             tf.logging.info("  name = %s, shape = %s" % (name, features[name].shape))
-
+        # 获取数据
         input_ids = features["input_ids"]
         input_mask = features["input_mask"]
         segment_ids = features["segment_ids"]
@@ -113,19 +113,20 @@ def model_fn_builder(bert_config, init_checkpoint,learning_rate,
         next_sentence_labels = features["next_sentence_labels"]
 
         is_training = (mode == tf.estimator.ModeKeys.TRAIN)
-
+        # 传入到bert模型
         model = modeling.BertModel(
             config=bert_config, is_training=is_training,
             input_ids=input_ids,input_mask=input_mask,
             token_type_ids=segment_ids,use_one_hot_embeddings=use_one_hot_embeddings)
-
+        # masked_lm的 batch loss，平均loss，预测概率矩阵
         (masked_lm_loss,
          masked_lm_example_loss,masked_lm_log_probs) = get_masked_lm_output(
             bert_config,model.get_sequence_output(),model.get_embedding_table(),
             masked_lm_positions,masked_lm_ids, masked_lm_weights)
+        # 下一句预测的batch_loss, 平均loss，预测概率矩阵
         (next_sentence_loss, next_sentence_example_loss,next_sentence_log_probs) =\
             get_next_sentence_output(bert_config, model.get_pooled_output(), next_sentence_labels)
-
+        # loss相加
         total_loss = masked_lm_loss + next_sentence_loss
         tvars = tf.trainable_variables()
 
@@ -212,13 +213,17 @@ def model_fn_builder(bert_config, init_checkpoint,learning_rate,
 
     return model_fn
 
-def get_masked_lm_output(bert_config, input_tensor, output_weights,positions,
+def get_masked_lm_output(bert_config, input_tensor,# 这里的input_tensor是模型传回的最后一层结果，[batch_size, seq_length, hidden_size]
+                         output_weights, # 这个是embeddings table，[vocab_size,embedding_size]
+                         positions,
                          label_ids,label_weights):
     """Get loss and log probs for the masked LM."""
-    input_tensor = gather_indexes(input_tensor, positions)
+    # 获取positions位置的所有的encoder(即要预测的那些位置的encoder)
+    input_tensor = gather_indexes(input_tensor, positions) # shape: [batch_size*max_pred_pre_seq,hidden_size]
 
     with tf.variable_scope("cls/predictions"):
         with tf.variable_scope("transform"):
+            # encoder传入一个dense层，输出：[batch_size*max_pred_pre_seq,hidden_size]
             input_tensor = tf.layers.dense(
                 input_tensor,units=bert_config.hidden_size,activation=modeling.get_activation(bert_config.hidden_act),
                 kernel_initializer=modeling.create_initializer(
@@ -229,36 +234,37 @@ def get_masked_lm_output(bert_config, input_tensor, output_weights,positions,
         output_bias = tf.get_variable(
             "output_bias",shape=[bert_config.vocab_size],
             initializer=tf.zeros_initializer())
-        logits = tf.matmul(input_tensor, output_weights, transpose_b=True)
-        logits = tf.nn.bias_add(logits, output_bias)
-        log_probs = tf.nn.log_softmax(logits,axis=-1)
+        logits = tf.matmul(input_tensor, output_weights, transpose_b=True) # [batch_size*max_pred_pre_seq, hidden_size] * [vocab_size,embedding_size]T == [batch_size*max_pred_pre_seq,vocab_size]
+        logits = tf.nn.bias_add(logits, output_bias) #
+        log_probs = tf.nn.log_softmax(logits,axis=-1) # [batch_size*max_pred_per_seq, vocab_size]
 
-        label_ids = tf.reshape(label_ids,[-1])
+        label_ids = tf.reshape(label_ids,[-1])  # 拉平label_ids: [batch_size * max_pred_per_seq]
         label_weights = tf.reshape(label_weights, [-1])
 
-        one_hot_labels = tf.one_hot(
-            label_ids,depth=bert_config.vocab_size,dtype=tf.float32)
+        one_hot_labels = tf.one_hot( #[batch_size*max_pred_per_seq ,vocab_size]
+            label_ids,depth=bert_config.vocab_size,dtype=tf.float32)  #label id转one hot
         # “位置”张量可以补零（如果序列太短而无法获得最大预测数）。
         # 对于每个真实的预测，“ label_weights”张量的值为1.0，对于填充预测，其值为0.0。
         per_example_loss = -tf.reduce_sum(log_probs * one_hot_labels, axis=[-1])
-        numerator = tf.reduce_sum(label_weights*per_example_loss)
+        numerator = tf.reduce_sum(label_weights*per_example_loss) #[batch_size*max_pred_per_seq]
         denominator = tf.reduce_sum(label_weights) + 1e-5
         loss = numerator / denominator
         return (loss, per_example_loss, log_probs)
 
-def get_next_sentence_output(bert_config,input_tensor,labels):
+def get_next_sentence_output(bert_config,input_tensor,labels): # 输入的input_tensor，[batch_size, hidden_size]
 
     with tf.variable_scope("cls/seq_relationship"):
         output_weights = tf.get_variable(
             "output_weights", shape=[2, bert_config.hidden_size],
             initializer=modeling.create_initializer(bert_config.initializer_range))
-        output_bias = tf.get_variable("output_bias", shape=[2],initializer=tf.zeros_initializer())
-        logits = tf.matmul(input_tensor, output_weights, transpose_b=True)
-        logits = tf.nn.bias_add(logits, output_bias)
+        output_bias = tf.get_variable("output_bias", shape=[2],initializer=tf.zeros_initializer()) #[batch_size,hidden_size]
+
+        logits = tf.matmul(input_tensor, output_weights, transpose_b=True) # [batch_size,2]
+        logits = tf.nn.bias_add(logits, output_bias) #[batch_size,2]
         log_probs = tf.nn.log_softmax(logits,axis=-1)
         labels = tf.reshape(labels,[-1])
-        one_hot_labels = tf.one_hot(labels, depth=2,dtype=tf.float32)
-        per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1)
+        one_hot_labels = tf.one_hot(labels, depth=2,dtype=tf.float32) #[batch_size,2]
+        per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1) #[batch_size]
         loss = tf.reduce_sum(per_example_loss)
         return (loss, per_example_loss, log_probs)
 
@@ -343,7 +349,7 @@ def main(_):
     if not FLAGS.do_train and not FLAGS.do_eval:
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
-    bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
+    bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file) # 配置文件
 
     tf.gfile.MakeDirs(FLAGS.output_dir)
 
@@ -361,7 +367,7 @@ def main(_):
             FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
 
     is_per_host = tf.contrib.tpu.InputPipelineConfig.PER_HOST_V2
-    run_config = tf.contrib.tpu.RunConfig(
+    run_config = tf.contrib.tpu.RunConfig( # 指定训练参数
         cluster=tpu_cluster_resolver,
         master=FLAGS.master,
         model_dir=FLAGS.output_dir,
@@ -371,18 +377,19 @@ def main(_):
             num_shards=FLAGS.num_tpu_cores,
             per_host_input_for_training=is_per_host))
 
-    model_fn = model_fn_builder(
+    model_fn = model_fn_builder(  # 自定义模型，主要用于Estimator训练
         bert_config=bert_config,init_checkpoint=FLAGS.init_checkpoint,
         learning_rate=FLAGS.learning_rate,num_train_steps=FLAGS.num_train_steps,
         num_warmup_steps=FLAGS.num_train_steps,use_tpu=FLAGS.use_tpu, use_one_hot_embeddings=FLAGS.use_tpu)
 
-    estimator = tf.contrib.tpu.TPUEstimator(
+    estimator = tf.contrib.tpu.TPUEstimator( #创建TPUEstimator
         use_tpu=FLAGS.use_tpu, model_fn=model_fn,config=run_config,
         train_batch_size=FLAGS.train_batch_size,eval_batch_size=FLAGS.eval_batch_size)
 
     if FLAGS.do_train:
         tf.logging.info("***** Running training *****")
         tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
+        # 创建输入训练集
         train_input_fn = input_fn_builder(input_files=input_files, max_seq_length=FLAGS.max_seq_length,
                                           max_predictions_per_seq=FLAGS.max_predictions_per_seq,is_training=True)
 
